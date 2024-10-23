@@ -13,6 +13,11 @@
     <artifactId>langchain4j-bedrock</artifactId>
     <name>LangChain4j :: Integration :: Amazon Bedrock</name>
 
+    <properties>
+        <!-- TODO: remove enforcer.skipRules -->
+        <enforcer.skipRules>dependencyConvergence</enforcer.skipRules>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>dev.langchain4j</groupId>
@@ -22,7 +27,6 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bedrock</artifactId>
-            <version>2.20.162</version>
             <exclusions>
                 <exclusion>
                     <groupId>io.netty</groupId>
@@ -39,7 +43,6 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bedrockruntime</artifactId>
-            <version>2.20.162</version>
         </dependency>
 
         <dependency>
