@@ -3,6 +3,8 @@ package dev.langchain4j.agentic.internal;
 import static dev.langchain4j.agentic.internal.AgentUtil.agenticSystemDataTypes;
 import static dev.langchain4j.agentic.internal.AgentUtil.argumentsFromMethod;
 import static dev.langchain4j.agentic.internal.AgentUtil.rawType;
+import static dev.langchain4j.agentic.observability.ComposedAgentListener.composeWithInherited;
+import static dev.langchain4j.agentic.observability.ComposedAgentListener.listenerOfType;
 import static dev.langchain4j.agentic.observability.ListenerNotifierUtil.afterAgentInvocation;
 import static dev.langchain4j.agentic.observability.ListenerNotifierUtil.beforeAgentInvocation;
 import static dev.langchain4j.agentic.observability.ListenerNotifierUtil.afterAgenticScopeCreated;
@@ -21,6 +23,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -28,6 +31,8 @@ import dev.langchain4j.agentic.UntypedAgent;
 import dev.langchain4j.agentic.agent.ErrorContext;
 import dev.langchain4j.agentic.agent.ErrorRecoveryResult;
 import dev.langchain4j.agentic.observability.AgentListener;
+import dev.langchain4j.agentic.observability.AgentMonitor;
+import dev.langchain4j.agentic.observability.MonitoredAgent;
 import dev.langchain4j.agentic.planner.Action;
 import dev.langchain4j.agentic.planner.AgentArgument;
 import dev.langchain4j.agentic.planner.AgentInstance;
@@ -42,7 +47,7 @@ import dev.langchain4j.agentic.scope.AgenticScopeAccess;
 import dev.langchain4j.agentic.scope.AgenticScopeRegistry;
 import dev.langchain4j.agentic.scope.DefaultAgenticScope;
 import dev.langchain4j.agentic.scope.ResultWithAgenticScope;
-import dev.langchain4j.agentic.workflow.LoopAgentInstance;
+import dev.langchain4j.agentic.workflow.impl.ParallelMapperServiceImpl;
 import dev.langchain4j.internal.DefaultExecutorProvider;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.ParameterNameResolver;
@@ -54,7 +59,7 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
 
     private final Function<AgenticScope, Object> output;
 
-    protected final AgentListener agentListener;
+    protected AgentListener agentListener;
 
     private final Consumer<AgenticScope> beforeCall;
 
@@ -109,10 +114,10 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
         this.outputType = service.agentReturnType();
         this.allowStreamingOutput = UntypedAgent.class.isAssignableFrom(this.type) ||
                 TokenStream.class.isAssignableFrom(rawType(this.outputType));
-        setParent(parent);
         this.outputKey = service.outputKey;
         this.arguments = service.agenticMethod != null ? argumentsFromMethod(service.agenticMethod) : List.of();
         this.subagents = service.subagents.stream().map(AgentInstance.class::cast).toList();
+        setParent(parent);
     }
 
     public AgenticScopeOwner withAgenticScope(DefaultAgenticScope agenticScope) {
@@ -153,6 +158,10 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
             }
         }
 
+        if (method.getDeclaringClass() == MonitoredAgent.class) {
+            return listenerOfType(agentListener, AgentMonitor.class);
+        }
+
         if (method.getDeclaringClass() == Object.class) {
             return switch (method.getName()) {
                 case "toString" -> service.serviceType() + "<" + type.getSimpleName() + ">";
@@ -185,20 +194,18 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
 
         Map<String, Object> namedArgs = isRootCall() ? argToMap(method, args) : null;
         if (isRootCall()) {
-            currentScope.setListener(agentListener);
             currentScope.rootCallStarted(registry);
             beforeAgentInvocation(agentListener, currentScope, this, namedArgs);
         }
 
         Planner planner = plannerSupplier.get();
         planner.init(new InitPlanningContext(currentScope, this, subagents));
-        Object result = new PlannerLoop(planner, currentScope).loop();
+        Object result = new PlannerLoop(planner, currentScope, registry).loop();
         Object output = outputKey != null ? currentScope.readState(outputKey) : result;
 
         if (isRootCall()) {
             afterAgentInvocation(agentListener, currentScope, this, namedArgs, output);
-            currentScope.rootCallEnded(registry);
-            currentScope.setListener(null);
+            currentScope.rootCallEnded(registry, agentListener);
         }
 
         return method.getReturnType().equals(ResultWithAgenticScope.class)
@@ -218,6 +225,11 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
             namedArgs.put(ParameterNameResolver.name(method.getParameters()[i]), args[i]);
         }
         return namedArgs;
+    }
+
+    @Override
+    public String toString() {
+        return service.serviceType() + "<" + type.getSimpleName() + ">";
     }
 
     @Override
@@ -272,15 +284,33 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
 
     @Override
     public void setParent(InternalAgent parent) {
+        if (parent == null) {
+            return;
+        }
         this.parent = parent;
-        if (parent != null && !parent.allowStreamingOutput()) {
+        registerInheritedParentListener(parent.listener());
+        if (!parent.allowStreamingOutput()) {
             this.allowStreamingOutput = false;
+        }
+    }
+
+    @Override
+    public void registerInheritedParentListener(AgentListener parentListener) {
+        if (parentListener != null && parentListener.inheritedBySubagents()) {
+            agentListener = composeWithInherited(agentListener, parentListener);
+            subagents().stream().map(InternalAgent.class::cast)
+                    .forEach(agent -> agent.registerInheritedParentListener(parentListener));
         }
     }
 
     @Override
     public boolean allowStreamingOutput() {
         return allowStreamingOutput;
+    }
+
+    @Override
+    public boolean allowChatMemory() {
+        return !ParallelMapperServiceImpl.SERVICE_TYPE.equals(service.serviceType());
     }
 
     @Override
@@ -309,17 +339,28 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
     }
 
     private class PlannerLoop implements PlannerExecutor {
+        static final String EXECUTION_STATE_PREFIX = "__planner_state_";
+
         private final Planner planner;
         private final DefaultAgenticScope agenticScope;
+        private final AgenticScopeRegistry registry;
+        private final ReentrantLock lock = new ReentrantLock();
 
-        private Action nextAction = null;
+        private volatile Action nextAction = null;
 
-        private PlannerLoop(Planner planner, DefaultAgenticScope agenticScope) {
+        private PlannerLoop(Planner planner, DefaultAgenticScope agenticScope, AgenticScopeRegistry registry) {
             this.planner = planner;
             this.agenticScope = agenticScope;
+            this.registry = registry;
         }
 
+        @SuppressWarnings("unchecked")
         public Object loop() {
+            Map<String, Object> savedState = agenticScope.readState(executionStateId(), Map.of());
+            if (!savedState.isEmpty()) {
+                planner.restoreExecutionState(savedState);
+            }
+
             nextAction = planner.firstAction(new PlanningContext(agenticScope, null));
             while (nextAction == null || !nextAction.isDone()) {
                 if (nextAction == null) {
@@ -334,7 +375,15 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
                     default -> parallelExecution(agents);
                 }
             }
+
+            // Clear execution state when planner is done
+            agenticScope.writeState(executionStateId(), null);
+
             return result();
+        }
+
+        private String executionStateId() {
+            return EXECUTION_STATE_PREFIX + agentId();
         }
 
         private void parallelExecution(List<AgentExecutor> agents) {
@@ -353,9 +402,9 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
                 throw new RuntimeException(e);
             }
         }
-
         private Object result() {
             Object result = output != null ? output.apply(agenticScope) : nextAction.result();
+
             if (outputKey != null) {
                 if (result != null) {
                     agenticScope.writeState(outputKey, result);
@@ -369,7 +418,22 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
 
         @Override
         public void onSubagentInvoked(AgentInvocation agentInvocation) {
-            this.nextAction = composeActions(this.nextAction, planner.nextAction(new PlanningContext(agenticScope, agentInvocation)));
+            lock.lock();
+            try {
+                this.nextAction = composeActions(this.nextAction, planner.nextAction(new PlanningContext(agenticScope, agentInvocation)));
+
+                // Save planner execution state after each agent invocation
+                Map<String, Object> execState = planner.executionState();
+                if (!execState.isEmpty()) {
+                    agenticScope.writeState(executionStateId(), execState);
+                }
+
+                if (registry != null) {
+                    agenticScope.checkpoint(registry);
+                }
+            } finally {
+                lock.unlock();
+            }
         }
 
         @Override
@@ -378,10 +442,10 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
         }
 
         private static Action composeActions(Action first, Action second) {
-            if (first == null || first.isDone()) {
+            if (first == null || first.isDone() || isEmptyCall(first)) {
                 return second;
             }
-            if (second == null || second.isDone()) {
+            if (second == null || second.isDone() || isEmptyCall(second)) {
                 return first;
             }
 
@@ -389,6 +453,10 @@ public class PlannerBasedInvocationHandler implements InvocationHandler, Interna
             agentsToCall.addAll(((Action.AgentCallAction) first).agentsToCall());
             agentsToCall.addAll(((Action.AgentCallAction) second).agentsToCall());
             return new Action.AgentCallAction(agentsToCall);
+        }
+
+        private static boolean isEmptyCall(Action action) {
+            return action instanceof Action.AgentCallAction aca && aca.agentsToCall().isEmpty();
         }
     }
 

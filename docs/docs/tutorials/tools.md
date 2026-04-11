@@ -13,7 +13,7 @@ All LLMs supporting tools can be found [here](/integrations/language-models) (se
 :::note
 Not all LLMs support tools equally well.
 The ability to understand, select, and correctly use tools depends heavily on the specific model and its capabilities.
-Some models may not support tools at all, while others might require careful prompt engineering 
+Some models may not support tools at all, while others might require careful prompt engineering
 or additional system instructions.
 :::
 
@@ -192,6 +192,22 @@ class WeatherTools {
 List<ToolSpecification> toolSpecifications = ToolSpecifications.toolSpecificationsFrom(WeatherTools.class);
 ```
 
+### JSON Serialization
+
+`ToolSpecification` can be serialized to JSON and deserialized back using `toJson()` and `fromJson()` methods.
+This can be useful, for example, when you want to store tool specifications in a database or transfer them over the network.
+
+```java
+String json = toolSpecification.toJson();
+
+ToolSpecification deserialized = ToolSpecification.fromJson(json);
+```
+
+By default, a dedicated Jackson `ObjectMapper` is used for the JSON conversion.
+You can provide your own implementation of `ToolSpecificationJsonCodec` via SPI
+by implementing `ToolSpecificationJsonCodecFactory` and registering it
+in `META-INF/services/dev.langchain4j.spi.agent.tool.ToolSpecificationJsonCodecFactory`.
+
 ### Using `ChatModel`
 
 Once you have a `List<ToolSpecification>`, you can call the model:
@@ -230,6 +246,29 @@ ChatRequest request2 = ChatRequest.builder()
         .build();
 ChatResponse response2 = model.chat(request2);
 ```
+
+#### Multimodal Tool Results
+`ToolExecutionResultMessage` can also carry non-text content such as images.
+Instead of using `text()`, you can use the builder with `contents()`:
+
+```java
+ToolExecutionResultMessage toolExecutionResultMessage = ToolExecutionResultMessage.builder()
+        .id(toolExecutionRequest.id())
+        .toolName(toolExecutionRequest.name())
+        .contents(
+                TextContent.from("Here is the photo"),
+                ImageContent.from(Image.builder()
+                        .base64Data(base64Data)
+                        .mimeType("image/png")
+                        .build())
+        )
+        .build();
+```
+
+:::note
+Not all LLM providers support multimodal tool results.
+See [Returning Images and Multimodal Content](/tutorials/tools#returning-images-and-multimodal-content) for details on provider support.
+:::
 
 ### Using `StreamingChatModel`
 
@@ -335,6 +374,31 @@ Methods annotated with `@Tool` can accept any number of parameters of various ty
 
 Methods without parameters are supported as well.
 
+#### Parameter Name
+
+By default, if the `name` attribute of `@P` is not specified, the parameter name is obtained via reflection.
+However, without the `-parameters` javac option, reflection returns generic names like `arg0`, `arg1`, etc.
+The semantic meaning of the parameter is lost, which may confuse the LLM.
+
+Setting `name` in `@P` is useful in two cases:
+
+1. **Missing `-parameters` javac option** — to avoid generic `arg0`/`arg1` names that the LLM would otherwise see.
+   Note that frameworks like Quarkus and Spring enable `-parameters` by default,
+   so the actual method parameter names are preserved and you typically do not need to set `name` when using those frameworks.
+2. **Custom name for the LLM** — when you want the LLM to see a different parameter name than the one in the source code
+   (for example, to match a specific API contract or to provide a more descriptive name).
+
+**Example:**
+
+```java
+@Tool
+void getTemperature(
+        @P("Temperature value") double value,
+        @P("Unit of temperature") Optional<String> unit) {
+    ...
+}
+```
+
 #### Required and Optional
 
 By default, all tool method parameters are considered **_required_**.
@@ -342,7 +406,23 @@ This means that the LLM will have to produce a value for such a parameter.
 A parameter can be made optional by annotating it with `@P(required = false)`:
 ```java
 @Tool
-void getTemperature(String location, @P(value = "Unit of temperature", required = false) Unit unit) {
+void getTemperature(String location, @P("Unit of temperature", required = false) Unit unit) {
+    ...
+}
+```
+
+#### Alternative: Using `Optional<T>` for Optional Parameters
+
+Instead of annotating parameters with `@P(required = false)`, you simply declare the parameter as `Optional<T>`.
+Any parameter of type `Optional<T>` will be treated as optional automatically, even without specify `required = false` in the `@P` annotation.
+
+**Example:**
+```java
+@Tool
+void getTemperature(
+    @P("Temperature value") double value,
+    @P("Unit of temperature") Optional<String> unit
+) {
     ...
 }
 ```
@@ -373,6 +453,47 @@ If the method has a `void` return type, "Success" string is sent to the LLM if t
 If the method has a `String` return type, the returned value is sent to the LLM as is, without any conversions.
 
 For other return types, the returned value is converted into a JSON string before being sent to the LLM.
+
+#### Returning Images and Multimodal Content
+
+Tools can also return images and other non-text content. When a tool returns one of the following types,
+the result is sent to the LLM as multimodal content (e.g., image) instead of being serialized to JSON text:
+
+- `Image` — sent as a single image
+- `ImageContent` — sent as a single image content
+- `Content` — sent as a single content element (e.g., `TextContent`, `ImageContent`)
+- `List<Content>` — sent as multiple content elements
+- `Content[]` — sent as multiple content elements
+
+For example, a tool that takes a photo and returns an image:
+```java
+@Tool("Takes a photo and returns it")
+Image takePhoto() {
+    byte[] imageBytes = camera.capture();
+    return Image.builder()
+            .base64Data(Base64.getEncoder().encodeToString(imageBytes))
+            .mimeType("image/png")
+            .build();
+}
+```
+
+Or a tool that returns both text and an image:
+```java
+@Tool("Takes a photo and returns it with a description")
+List<Content> takePhoto() {
+    Image image = camera.capture();
+    return List.of(
+            TextContent.from("Photo taken at " + LocalDateTime.now()),
+            ImageContent.from(image)
+    );
+}
+```
+
+:::note
+Not all LLM providers support multimodal tool results.
+Providers that currently support images in tool results include Anthropic, Amazon Bedrock, and Google AI Gemini.
+Other providers will throw an `UnsupportedFeatureException` if a tool returns non-text content.
+:::
 
 ### AI services as tools for other AI services
 
@@ -506,9 +627,44 @@ This way, the LLM has more information to decide whether or not to call the give
 ### `@P`
 Method parameters can optionally be annotated with `@P`.
 
-The `@P` annotation has 2 fields
-- `value`: description of the parameter. Mandatory field.
-- `required`: whether the parameter is required, default is `true`. Optional field.
+The `@P` annotation has the following optional fields:
+
+- `name`: name of the parameter as seen by the LLM. If not specified, the actual method parameter name is used.
+- `description`: description of the parameter (alias of `value`). Empty by default.
+- `value`: description of the parameter (alias of `description`). Empty by default.
+- `required`: whether the parameter is required, default is `true`.
+
+#### Parameter Name
+
+The `name` attribute overrides the parameter name that the LLM will see.
+Setting `name` is useful in two cases:
+
+1. **Missing `-parameters` javac option.**
+   Without the `-parameters` javac option, Java reflection returns generic names such as `arg0`, `arg1`, etc.
+   The semantic meaning of the parameter is lost, which may confuse the LLM.
+   Setting `name` restores a meaningful name.
+   Note that frameworks like Quarkus and Spring enable `-parameters` by default,
+   so the actual method parameter names are preserved and you typically do not need to set `name` when using those frameworks.
+
+2. **Custom name for the LLM.**
+   When you want the LLM to see a different parameter name than the one the developer uses in the source code
+   (for example, to match a specific API contract or to provide a more descriptive name).
+
+
+#### Parameter Description
+
+`description` and `value` are interchangeable — they both set the parameter's description that the LLM will see.
+When only a description is needed, use the shorthand `value` form:
+```java
+@Tool
+void getWeather(@P("The city name") String city) { ... }
+```
+
+When both a name and a description are needed, use named attributes:
+```java
+@Tool
+void getWeather(@P(name = "city", description = "The city name") String city) { ... }
+```
 
 ### `@Description`
 The description of classes and fields can be specified using the `@Description` annotation:
@@ -669,6 +825,7 @@ List<ToolExecution> toolExecutions = result.toolExecutions();
 ToolExecution toolExecution = toolExecutions.get(0);
 ToolExecutionRequest request = toolExecution.request();
 String result = toolExecution.result(); // tool execution result as text
+List<Content> resultContents = toolExecution.resultContents(); // tool execution result as content list (may include images)
 Object resultObject = toolExecution.resultObject(); // actual value returned by the tool
 ```
 
@@ -816,6 +973,169 @@ ToolProvider toolProvider = (toolProviderRequest) -> {
 ```
 
 It is possible for an AI service to use both programmatically and dynamically specified tools in the same invocation.
+
+### Tool Search
+
+When working with a large number of tools,
+sending all tools on every request can significantly increase token usage and reduce model performance.
+To address this, LangChain4j provides a tool search mechanism
+that allows tools to be discovered dynamically by the LLM itself,
+instead of being exposed upfront.
+
+The core idea is simple:
+- Initially, the LLM is exposed to one or more special tool-search tools
+- The LLM can call these tools to search for relevant tools
+- Once relevant tools are found, they are included in subsequent requests to the LLM
+
+This enables scalable, token-efficient, and model-driven tool discovery.
+
+#### How Tool Search Works
+
+A tool search flow typically looks like this:
+1. Initial request:
+   - The LLM sees only tool-search tools (not the full tool set)
+2. Tool search
+   - The LLM calls a tool-search tool, describing what kind of tool it needs
+   - The tool-search strategy matches the request against available tools
+4. Tool exposure
+   - Matching tools are added to the next request to the LLM
+5. Tool execution
+   - The LLM can now call the found tools normally
+
+Previously found tools are accumulated across multiple tool-search calls.
+Each time the LLM invokes the tool-search tool,
+the newly matched tools are added to the existing set of tools visible to the LLM (they are merged, not replaced).
+This means the list of tools visible to the LLM can grow over time.
+Found tools remain visible to the LLM until their corresponding `ToolExecutionResultMessage`
+is evicted from the `ChatMemory`, and at least until the end of the AI Service invocation.
+
+If `ChatMemory` is not configured, the found tools remain visible to the LLM
+only until the end of the AI service invocation.
+
+#### ToolSearchStrategy
+
+Tool search is implemented via the `ToolSearchStrategy` interface:
+
+```java
+@Experimental
+public interface ToolSearchStrategy {
+
+    List<ToolSpecification> getToolSearchTools(InvocationContext invocationContext);
+
+    ToolSearchResult search(ToolSearchRequest toolSearchRequest);
+}
+```
+
+A `ToolSearchStrategy` is responsible for:
+- Exposing tool-search tools to the LLM
+- Executing tool search requests generated by the LLM
+- Returning matching tool names, which will then be resolved and exposed
+
+LangChain4j currently provides 2 out-of-the-box implementations:
+- `SimpleToolSearchStrategy` – keyword-based matching
+- `VectorToolSearchStrategy` – semantic search using embeddings
+
+See Javadoc of these classes for more details.
+
+You can also implement custom strategies.
+
+#### Configuring Tool Search in AI Services
+
+Tool search is configured at the AI Service level:
+
+```java
+Assistant assistant = AiServices.builder(Assistant.class)
+    .chatModel(chatModel)
+    .chatMemory(chatMemory)
+    .tools(tools) // tool search works for static tools
+    .toolProvider(mcpToolProvider) // tool search works for tools provided dynamically (e.g., MCP)
+    .toolSearchStrategy(new SimpleToolSearchStrategy())
+    .build();
+```
+
+Once configured:
+- The LLM no longer sees all tools upfront
+- Tool discovery becomes an explicit, model-driven step
+- Token usage is reduced, especially with large tool sets
+
+#### When to Use Tool Search
+
+Tool search is especially useful when:
+- You have many tools (dozens or hundreds)
+- Tools are domain-specific or rarely used
+- Tool availability depends on context, user, or permissions
+- You want the LLM to reason about which tools it needs, instead of guessing from a long list
+
+If you have only a small number of tools, or all tools are always relevant,
+using regular approach may be simpler.
+
+#### Always Visible Tools
+
+When tool search is enabled, tools are normally hidden from the LLM until they are discovered via a tool-search call.
+However, in some cases you may want certain tools to always be visible to the LLM.
+
+Typical use cases:
+- Core tools that should always be accessible
+- Frequently used tools where search overhead is unnecessary
+- Utility tools
+
+LangChain4j supports this via the `ALWAYS_VISIBLE` tool search behavior.
+
+##### How It Works
+
+When a tool is marked as `ALWAYS_VISIBLE`:
+- It is exposed to the LLM in the very first request
+- It does not require discovery via tool search
+- It remains visible throughout the AI Service invocation
+- It is not included in searchable tool candidates
+
+All other tools continue to follow the normal tool-search flow.
+
+##### Using `@Tool` Annotation
+
+You can mark a tool as always visible via the @Tool annotation:
+```java
+@Tool(searchBehavior = ALWAYS_VISIBLE)
+String getWeather(String city) {
+    return weatherService.getWeather(city);
+}
+```
+
+##### Using `McpToolProvider`
+
+When using MCP tools (via `McpToolProvider`), always-visible tools can be configured via `alwaysVisibleToolNames`:
+
+```java
+McpToolProvider.builder()
+    .mcpClients(mcpClient)
+    .alwaysVisibleToolNames("getWeather")
+    .build();
+```
+
+##### Using `ToolSpecification`
+
+If you configure tools programmatically, you can mark them as always visible using `metadata`:
+```java
+ToolSpecification toolSpecification = ToolSpecification.builder()
+    .name("getWeather")
+    .parameters(JsonObjectSchema.builder()
+        .addStringProperty("city")
+        .required("city")
+        .build())
+    .metadata(Map.of(ToolSpecification.METADATA_SEARCH_BEHAVIOR, SearchBehavior.ALWAYS_VISIBLE))
+    .build();
+```
+
+#### Notes and Limitations
+
+:::note
+Tool search relies on the LLM’s ability to understand when and how to search for tools.
+The effectiveness of this feature depends heavily on the chosen model.
+:::
+
+:::note
+Tool search is currently marked as experimental and may evolve in future releases.
+:::
 
 ### Returning immediately the result of a tool execution request
 
@@ -970,3 +1290,4 @@ More information on this can be found [here](/tutorials/mcp/#creating-an-mcp-too
 
 - [Example with Tools](https://github.com/langchain4j/langchain4j-examples/blob/main/other-examples/src/main/java/ServiceWithToolsExample.java)
 - [Example with dynamic Tools](https://github.com/langchain4j/langchain4j-examples/blob/main/other-examples/src/main/java/ServiceWithDynamicToolsExample.java)
+@

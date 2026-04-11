@@ -55,7 +55,6 @@ class GoogleAiGeminiImageModelIT {
         var subject = GoogleAiGeminiImageModel.builder()
                 .apiKey(GOOGLE_AI_GEMINI_API_KEY)
                 .modelName(MODEL_NAME)
-                .logRequestsAndResponses(true)
                 .build();
 
         // First generate an image to edit
@@ -82,7 +81,6 @@ class GoogleAiGeminiImageModelIT {
         var subject = GoogleAiGeminiImageModel.builder()
                 .apiKey(GOOGLE_AI_GEMINI_API_KEY)
                 .modelName(NANO_BANANA_PRO)
-                .logRequestsAndResponses(true)
                 .useGoogleSearchGrounding(true)
                 .aspectRatio("1:1")
                 .build();
@@ -125,8 +123,6 @@ class GoogleAiGeminiImageModelIT {
         Map<String, Object> searchEntryPoint = (Map<String, Object>) groundingMetadata.get("searchEntryPoint");
         assertThat(searchEntryPoint).containsKey("renderedContent");
         assertThat((String) searchEntryPoint.get("renderedContent")).isNotBlank();
-
-        saveImage(imageResponse.content(), "paris_weather_illustration");
     }
 
     private static void saveImage(Image image, String fileName) throws IOException {

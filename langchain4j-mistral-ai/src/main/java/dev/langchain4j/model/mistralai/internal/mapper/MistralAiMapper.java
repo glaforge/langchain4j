@@ -24,6 +24,7 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.exception.UnsupportedFeatureException;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.request.ToolChoice;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
@@ -100,6 +101,11 @@ public class MistralAiMapper {
         }
 
         if (message instanceof ToolExecutionResultMessage toolExecutionResultMessage) {
+            if (!toolExecutionResultMessage.hasSingleText()) {
+                throw new UnsupportedFeatureException(
+                        "Mistral AI does not support non-text content in tool results. "
+                                + "Only text content is supported.");
+            }
             return MistralAiChatMessage.builder()
                     .role(MistralAiRole.TOOL)
                     .toolCallId(toolExecutionResultMessage.id())
@@ -233,7 +239,8 @@ public class MistralAiMapper {
         }
     }
 
-    public static MistralAiResponseFormat toMistralAiResponseFormat(ResponseFormat responseFormat) {
+    public static MistralAiResponseFormat toMistralAiResponseFormat(
+            ResponseFormat responseFormat, boolean strictJsonSchema) {
         if (responseFormat == null) {
             return null;
         }
@@ -241,7 +248,7 @@ public class MistralAiMapper {
             case TEXT -> MistralAiResponseFormat.fromType(MistralAiResponseFormatType.TEXT);
             case JSON ->
                 responseFormat.jsonSchema() != null
-                        ? MistralAiResponseFormat.fromSchema(responseFormat.jsonSchema())
+                        ? MistralAiResponseFormat.fromSchema(responseFormat.jsonSchema(), strictJsonSchema)
                         : MistralAiResponseFormat.fromType(MistralAiResponseFormatType.JSON_OBJECT);
         };
     }

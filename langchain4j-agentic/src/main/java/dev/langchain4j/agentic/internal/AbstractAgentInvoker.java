@@ -74,6 +74,11 @@ public abstract class AbstractAgentInvoker implements AgentInvoker, InternalAgen
     }
 
     @Override
+    public boolean optional() {
+        return agent.optional();
+    }
+
+    @Override
     public AgentInvocationArguments toInvocationArguments(AgenticScope agenticScope) throws MissingArgumentException {
         return AgentUtil.agentInvocationArguments(agenticScope, arguments());
     }
@@ -132,6 +137,11 @@ public abstract class AbstractAgentInvoker implements AgentInvoker, InternalAgen
     @Override
     public void setParent(InternalAgent parent) {
         agent.setParent(parent);
+    }
+
+    @Override
+    public void registerInheritedParentListener(AgentListener parentListener) {
+        agent.registerInheritedParentListener(parentListener);
     }
 
     @Override

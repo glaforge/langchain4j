@@ -350,7 +350,7 @@ class OpenAiResponsesClient {
 
             var text = aiMessage.text();
             if (text != null && !text.isEmpty()) {
-                items.add(createMessageEntry(ROLE_ASSISTANT, List.of(createInputTextContent(text))));
+                items.add(createMessageEntry(ROLE_ASSISTANT, List.of(createOutputTextContent(text))));
             }
 
             if (aiMessage.hasToolExecutionRequests()) {
@@ -366,6 +366,11 @@ class OpenAiResponsesClient {
 
             return items;
         } else if (msg instanceof ToolExecutionResultMessage toolExecutionResultMessage) {
+            if (!toolExecutionResultMessage.hasSingleText()) {
+                throw new UnsupportedFeatureException(
+                        "OpenAI Responses API does not support non-text content in tool results. "
+                                + "Only text content is supported in function_call_output.");
+            }
             var outputEntry = new HashMap<String, Object>();
             outputEntry.put(FIELD_TYPE, TYPE_FUNCTION_CALL_OUTPUT);
             outputEntry.put(FIELD_CALL_ID, toolExecutionResultMessage.id());
@@ -389,6 +394,13 @@ class OpenAiResponsesClient {
     private Map<String, Object> createInputTextContent(String text) {
         var content = new HashMap<String, Object>();
         content.put(FIELD_TYPE, TYPE_INPUT_TEXT);
+        content.put(FIELD_TEXT, text);
+        return content;
+    }
+
+    private Map<String, Object> createOutputTextContent(String text) {
+        var content = new HashMap<String, Object>();
+        content.put(FIELD_TYPE, TYPE_OUTPUT_TEXT);
         content.put(FIELD_TEXT, text);
         return content;
     }
